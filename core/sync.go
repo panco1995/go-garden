@@ -3,6 +3,9 @@ package core
 import (
 	"bytes"
 	"context"
+	"errors"
+	"path/filepath"
+	"sync"
 
 	"github.com/panco95/go-garden/core/log"
 )
@@ -10,24 +13,54 @@ import (
 type Rpc int
 
 type SyncRoutesArgs struct {
-	Yml []byte
+	EtcdKey string
+	Yml     []byte
 }
 
 type SyncRoutesReply struct {
 	Result bool
 }
 
-// SyncRoutes sync routes.yml method
+type clusterRouteSync struct {
+	mu      sync.RWMutex
+	file    string
+	etcdKey string
+}
+
+var routeSync clusterRouteSync
+
+func (g *Garden) routesFile() string {
+	return filepath.Join(g.cfg.ConfigsPath, "routes.yml")
+}
+
+func (g *Garden) bindRouteSync() {
+	routeSync.mu.Lock()
+	routeSync.file = g.routesFile()
+	routeSync.etcdKey = g.cfg.Service.EtcdKey
+	routeSync.mu.Unlock()
+}
+
+// SyncRoutes writes this process's routes file when the caller belongs to the same cluster.
 func (r *Rpc) SyncRoutes(ctx context.Context, args *SyncRoutesArgs, reply *SyncRoutesReply) error {
-	reply.Result = true
-	if err := writeFile("./configs/routes.yml", args.Yml); err != nil {
-		reply.Result = false
+	reply.Result = false
+	if args == nil {
+		return errors.New("empty route sync")
 	}
+	routeSync.mu.RLock()
+	file, key := routeSync.file, routeSync.etcdKey
+	routeSync.mu.RUnlock()
+	if file == "" || key == "" || args.EtcdKey != key {
+		return errors.New("route sync rejected")
+	}
+	if err := writeFile(file, args.Yml); err != nil {
+		return err
+	}
+	reply.Result = true
 	return nil
 }
 
 func (g *Garden) sendRoutes() {
-	fileData, err := readFile("configs/routes.yml")
+	fileData, err := readFile(g.routesFile())
 	if err != nil {
 		log.Error("syncRoutes", err)
 		return
@@ -37,14 +70,15 @@ func (g *Garden) sendRoutes() {
 		return
 	}
 
-	if bytes.Compare(g.syncCache, fileData) == 0 {
+	if bytes.Equal(g.syncCache, fileData) {
 		return
 	}
 
 	g.syncCache = fileData
 
 	args := SyncRoutesArgs{
-		Yml: fileData,
+		EtcdKey: g.cfg.Service.EtcdKey,
+		Yml:     fileData,
 	}
 	reply := SyncRoutesReply{}
 	self := g.localNodeAddr()

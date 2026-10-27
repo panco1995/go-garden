@@ -11,6 +11,7 @@ func (g *Garden) bootstrap(configPath, runtimePath string) {
 	g.bootConfig("yml")
 	g.checkConfig()
 	log.Setup(g.cfg.RuntimePath, g.cfg.Service.Debug)
+	g.bindRouteSync()
 	log.Info("bootstrap", g.cfg.Service.ServiceName+" running")
 	g.bootEtcd()
 	g.bootService()

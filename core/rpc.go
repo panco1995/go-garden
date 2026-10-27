@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/panco95/go-garden/core/log"
 	"github.com/smallnest/rpcx/client"
 	rpcx_logger "github.com/smallnest/rpcx/log"
+	"github.com/smallnest/rpcx/protocol"
 	"github.com/smallnest/rpcx/server"
 	"github.com/smallnest/rpcx/share"
 )
@@ -21,7 +23,7 @@ type rpcPool struct {
 
 func (g *Garden) rpcListen(name, network, address string, obj interface{}, metadata string) error {
 	s := server.NewServer()
-
+	s.AuthFunc = g.rpcAuth
 	rpcx_logger.SetLogger(log.GetLogger())
 
 	if err := s.RegisterName(name, obj, metadata); err != nil {
@@ -53,6 +55,7 @@ func (g *Garden) rpcClient(service, addr string) (client.XClient, error) {
 		return nil, err
 	}
 	c := client.NewXClient(service, client.Failtry, client.RandomSelect, discovery, client.DefaultOption)
+	c.Auth(g.cfg.Service.CallKey)
 	g.rpcPool.clients[key] = c
 	return c, nil
 }
@@ -83,6 +86,13 @@ func (g *Garden) closeRPCClients(nodes []routedNode) {
 	for _, c := range closing {
 		c.Close()
 	}
+}
+
+func (g *Garden) rpcAuth(ctx context.Context, req *protocol.Message, token string) error {
+	if g.checkCallSafe(token) {
+		return nil
+	}
+	return errors.New(infoNoAuth)
 }
 
 func (g *Garden) rpcCall(span opentracing.Span, addr, service, method string, args, reply interface{}, timeout int) error {
