@@ -17,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/opentracing/opentracing-go"
 	"github.com/panco95/go-garden/core/log"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func (g *Garden) ginListen(listenAddress string, route func(r *gin.Engine), auth func() gin.HandlerFunc) error {
@@ -90,13 +89,6 @@ func notFound(r *gin.Engine) {
 	r.NoMethod(func(c *gin.Context) {
 		c.JSON(httpNotFound, gatewayFail(infoNotFound))
 	})
-}
-
-func (g *Garden) prometheus() gin.HandlerFunc {
-	h := promhttp.Handler()
-	return func(c *gin.Context) {
-		h.ServeHTTP(c.Writer, c.Request)
-	}
 }
 
 func cors(ctx *gin.Context) {

@@ -20,6 +20,7 @@ type (
 		fusingMap   sync.Map
 		limiterMap  sync.Map
 		rpcPool     rpcPool
+		life        lifecycle
 
 		metrics        sync.Map
 		requestProcess int64

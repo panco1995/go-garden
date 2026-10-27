@@ -66,24 +66,35 @@ func (g *Garden) servicePrefix() string {
 	return g.cfg.Service.EtcdKey + "_"
 }
 
-func (g *Garden) bootService() {
-	var err error
+func (g *Garden) bootService() error {
 	g.services = map[string]*service{}
 	rand.Seed(time.Now().UnixNano())
 
+	ctx, cancel := context.WithCancel(context.Background())
+	g.life.mu.Lock()
+	g.life.syncCancel = cancel
+	g.life.mu.Unlock()
+
 	if g.cfg.Service.ServiceIp == "" {
-		g.cfg.Service.ServiceIp, err = getOutboundIP()
+		ip, err := getOutboundIP()
 		if err != nil {
-			log.Fatal("bootService", err)
+			cancel()
+			return err
 		}
+		g.cfg.Service.ServiceIp = ip
 	}
 
-	if err = g.serviceRegister(true); err != nil {
-		log.Fatal("serviceRegister", err)
+	if err := g.serviceRegister(ctx, true); err != nil {
+		cancel()
+		return err
 	}
+	return nil
 }
 
-func (g *Garden) serviceRegister(isReconnect bool) error {
+func (g *Garden) serviceRegister(ctx context.Context, startWatch bool) error {
+	if g.isShuttingDown() || ctx.Err() != nil {
+		return errors.New("shutting down")
+	}
 	client, err := g.GetEtcd()
 	if err != nil {
 		return err
@@ -93,6 +104,7 @@ func (g *Garden) serviceRegister(isReconnect bool) error {
 	if err != nil {
 		return err
 	}
+	g.setLease(int64(resp.ID))
 	_, err = client.Put(context.TODO(), g.GetServiceId(), "0", clientV3.WithLease(resp.ID))
 	if err != nil {
 		return err
@@ -104,19 +116,21 @@ func (g *Garden) serviceRegister(isReconnect bool) error {
 	}
 	// monitor etcd connection
 	go func() {
-		for {
-			select {
-			case resp := <-ch:
-				if resp == nil {
-					go g.serviceRegister(false)
-					return
-				}
+		for resp := range ch {
+			if resp == nil {
+				break
 			}
+		}
+		if g.isShuttingDown() || ctx.Err() != nil {
+			return
+		}
+		if err := g.serviceRegister(ctx, false); err != nil && !g.isShuttingDown() {
+			log.Error("serviceRegister", err)
 		}
 	}()
 
-	if isReconnect {
-		go g.serviceSyncLoop()
+	if startWatch {
+		go g.serviceSyncLoop(ctx)
 	}
 	return nil
 }
@@ -125,18 +139,40 @@ func (g *Garden) serviceRegister(isReconnect bool) error {
 // Each pass lists the prefix and adds or deletes nodes to match that snapshot,
 // then watches from the next revision. When the watch closes, the loop starts
 // again with a fresh list so a dropped watch cannot leave stale nodes behind.
-func (g *Garden) serviceSyncLoop() {
+func (g *Garden) serviceSyncLoop(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		rev, err := g.syncServicesFromEtcd()
 		if err != nil {
 			log.Error("syncServices", err)
-			time.Sleep(time.Second)
+			if !waitCtx(ctx, time.Second) {
+				return
+			}
 			continue
 		}
-		if err = g.watchServices(rev); err != nil {
-			log.Error("watchServices", err)
-			time.Sleep(time.Second)
+		err = g.watchServices(ctx, rev)
+		if ctx.Err() != nil {
+			return
 		}
+		if err != nil {
+			log.Error("watchServices", err)
+			if !waitCtx(ctx, time.Second) {
+				return
+			}
+		}
+	}
+}
+
+func waitCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -183,26 +219,33 @@ func (g *Garden) syncServicesFromEtcd() (int64, error) {
 	return rev, nil
 }
 
-func (g *Garden) watchServices(syncedRev int64) error {
+func (g *Garden) watchServices(ctx context.Context, syncedRev int64) error {
 	client, err := g.GetEtcd()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	opts := []clientV3.OpOption{clientV3.WithPrefix()}
 	if syncedRev > 0 {
 		opts = append(opts, clientV3.WithRev(syncedRev+1))
 	}
-	rch := client.Watch(ctx, g.servicePrefix(), opts...)
-	for wresp := range rch {
-		if err := wresp.Err(); err != nil {
-			return err
+	rch := client.Watch(watchCtx, g.servicePrefix(), opts...)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case wresp, ok := <-rch:
+			if !ok {
+				return errors.New("service watch closed")
+			}
+			if err := wresp.Err(); err != nil {
+				return err
+			}
+			g.applyWatchEvents(wresp.Events)
 		}
-		g.applyWatchEvents(wresp.Events)
 	}
-	return errors.New("service watch closed")
 }
 
 func (g *Garden) applyWatchEvents(events []*clientV3.Event) {

@@ -24,8 +24,9 @@ type rpcPool struct {
 func (g *Garden) rpcListen(name, network, address string, obj interface{}, metadata string) error {
 	s := server.NewServer()
 	s.AuthFunc = g.rpcAuth
-	rpcx_logger.SetLogger(log.GetLogger())
-
+	if logger := log.GetLogger(); logger != nil {
+		rpcx_logger.SetLogger(logger)
+	}
 	if err := s.RegisterName(name, obj, metadata); err != nil {
 		return err
 	}
@@ -93,6 +94,16 @@ func (g *Garden) rpcAuth(ctx context.Context, req *protocol.Message, token strin
 		return nil
 	}
 	return errors.New(infoNoAuth)
+}
+
+func (g *Garden) closeAllRPCClients() {
+	g.rpcPool.mu.Lock()
+	clients := g.rpcPool.clients
+	g.rpcPool.clients = nil
+	g.rpcPool.mu.Unlock()
+	for _, c := range clients {
+		c.Close()
+	}
 }
 
 func (g *Garden) rpcCall(span opentracing.Span, addr, service, method string, args, reply interface{}, timeout int) error {
