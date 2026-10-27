@@ -48,7 +48,7 @@ func (g *Garden) callService(span opentracing.Span, service, action string, requ
 		second, quantity, err := limiterAnalyze(route.Limiter)
 		if err != nil {
 			log.Error("limiter", err)
-		} else if !g.limiterInspect(target.Addr+"/"+service+"/"+action, second, quantity) {
+		} else if !g.limiterInspect(breakerKey(target.Addr, service, action), second, quantity) {
 			span.SetTag("break", "service limiter")
 			return httpTooManyRequests, infoServerLimiter, nil, errors.New("server limiter")
 		}
@@ -59,7 +59,7 @@ func (g *Garden) callService(span opentracing.Span, service, action string, requ
 		second, quantity, err := g.fusingAnalyze(route.Fusing)
 		if err != nil {
 			log.Error("fusingAnalyze", err)
-		} else if !g.fusingInspect(target.Addr+"/"+service+"/"+action, second, quantity) {
+		} else if !g.fusingInspect(breakerKey(target.Addr, service, action), second, quantity) {
 			span.SetTag("break", "service fusing")
 			return httpNotFound, infoServerFusing, nil, errors.New("server fusing")
 		}
@@ -205,9 +205,6 @@ func hopByHop(headers MapData) map[string]struct{} {
 
 // CallRpc call other service rpc method
 func (g *Garden) CallRpc(span opentracing.Span, service, action string, args, reply interface{}) error {
-	_, _, _, err := g.callService(span, service, action, nil, &args, &reply)
-	if err != nil {
-		return err
-	}
-	return nil
+	_, _, _, err := g.callService(span, service, action, nil, args, reply)
+	return err
 }

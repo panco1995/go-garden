@@ -35,21 +35,34 @@ func retryAnalyze(retry string) ([]int, error) {
 func (g *Garden) retryGo(service, action string, retry []int, target *node, span opentracing.Span, route routeCfg, request *req, rpcArgs, rpcReply interface{}) (int, string, http.Header, error) {
 	code := httpOk
 	result := infoSuccess
-	addr := ""
 	var err error
 	var header http.Header
+	tried := make(map[string]struct{}, len(retry))
 
 	for i, r := range retry {
-		atomic.AddInt64(&target.Waiting, 1)
+		if target == nil {
+			next, selErr := g.selectServiceExcept(service, tried)
+			if selErr != nil {
+				next, selErr = g.selectService(service)
+				if selErr != nil {
+					if err != nil {
+						return code, infoServerError, nil, err
+					}
+					return httpNotFound, infoNotFound, nil, selErr
+				}
+			}
+			target = next
+		}
+		tried[target.Addr] = struct{}{}
 
+		atomic.AddInt64(&target.Waiting, 1)
 		if route.Type == "http" {
 			var host string
 			host, err = nodeHTTPAddr(target.Addr)
 			if err != nil {
 				code = httpFail
 			} else {
-				addr = "http://" + host + route.Path
-				code, result, header, err = g.requestServiceHttp(span, addr, request, route.Timeout)
+				code, result, header, err = g.requestServiceHttp(span, "http://"+host+route.Path, request, route.Timeout)
 			}
 		} else if route.Type == "rpc" {
 			var host string
@@ -57,42 +70,39 @@ func (g *Garden) retryGo(service, action string, retry []int, target *node, span
 			if err != nil {
 				code = httpFail
 			} else {
-				action = capitalize(action)
-				err = rpcCall(span, host, service, action, rpcArgs, rpcReply, route.Timeout)
+				err = g.rpcCall(span, host, service, capitalize(action), rpcArgs, rpcReply, route.Timeout)
 				if err != nil {
 					code = httpFail
 				}
 			}
 		}
-
 		atomic.AddInt64(&target.Waiting, -1)
 
-		if err != nil {
-			log.Error("callService", err)
-			g.addFusingQuantity(target.Addr + "/" + service + "/" + action)
-
-			// call timeout don't retry
-			if strings.Contains(err.Error(), "Timeout") || strings.Contains(err.Error(), "deadline") {
-				err = errors.New(fmt.Sprintf("Call %s %s %s timeout", route.Type, service, action))
-				return code, infoTimeout, nil, err
-			}
-
-			// call 404 don't retry
-			if code == httpNotFound {
-				return code, infoNotFound, nil, err
-			}
-
-			if i == len(retry)-1 {
-				return code, infoServerError, nil, err
-			}
-			time.Sleep(time.Millisecond * time.Duration(r))
-			continue
+		if err == nil {
+			atomic.AddInt64(&target.Finish, 1)
+			return code, result, header, nil
 		}
 
-		break
-	}
+		log.Error("callService", err)
+		g.addFusingQuantity(breakerKey(target.Addr, service, action))
 
-	atomic.AddInt64(&target.Finish, 1)
+		// call timeout don't retry
+		if strings.Contains(err.Error(), "Timeout") || strings.Contains(err.Error(), "deadline") {
+			err = errors.New(fmt.Sprintf("Call %s %s %s timeout", route.Type, service, action))
+			return code, infoTimeout, nil, err
+		}
+
+		// call 404 don't retry
+		if code == httpNotFound {
+			return code, infoNotFound, nil, err
+		}
+
+		if i == len(retry)-1 {
+			return code, infoServerError, nil, err
+		}
+		time.Sleep(time.Millisecond * time.Duration(r))
+		target = nil
+	}
 
 	return code, result, header, err
 }

@@ -19,6 +19,7 @@ type (
 		syncCache   []byte
 		fusingMap   sync.Map
 		limiterMap  sync.Map
+		rpcPool     rpcPool
 
 		metrics        sync.Map
 		requestProcess int64

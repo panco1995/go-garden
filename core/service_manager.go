@@ -179,6 +179,7 @@ func (g *Garden) syncServicesFromEtcd() (int64, error) {
 	for _, item := range left {
 		log.Infof("service", "%s node %s leave", item.serviceName, item.node.Addr)
 	}
+	g.closeRPCClients(left)
 	return rev, nil
 }
 
@@ -235,6 +236,7 @@ func (g *Garden) applyWatchEvents(events []*clientV3.Event) {
 	for _, item := range left {
 		log.Infof("service", "%s node %s leave", item.serviceName, item.node.Addr)
 	}
+	g.closeRPCClients(left)
 }
 
 // parseServiceKey splits {etcdKey}_{serviceName}_{ip}:{httpPort}:{rpcPort}.
@@ -380,22 +382,32 @@ func splitNodeAddr(addr string) (ip, httpPort, rpcPort string, err error) {
 // selectService copies the live node pointers, then picks the smallest Waiting.
 // Ties are broken at random among the nodes that share that waiting count.
 func (g *Garden) selectService(name string) (*node, error) {
+	return g.selectServiceExcept(name, nil)
+}
+
+// selectServiceExcept copies live node pointers except skip, then picks the smallest Waiting.
+func (g *Garden) selectServiceExcept(name string, skip map[string]struct{}) (*node, error) {
 	g.servicesMu.RLock()
 	svc, ok := g.services[name]
 	if !ok {
 		g.servicesMu.RUnlock()
 		return nil, errors.New("service not found")
 	}
-	if len(svc.Nodes) == 0 {
-		g.servicesMu.RUnlock()
-		return nil, errors.New("service node not found")
-	}
 	nodes := make([]*node, 0, len(svc.Nodes))
 	for _, n := range svc.Nodes {
+		if _, excluded := skip[n.Addr]; excluded {
+			continue
+		}
 		nodes = append(nodes, n)
 	}
 	g.servicesMu.RUnlock()
+	if len(nodes) == 0 {
+		return nil, errors.New("service node not found")
+	}
+	return pickLeastWaiting(nodes), nil
+}
 
+func pickLeastWaiting(nodes []*node) *node {
 	best := atomic.LoadInt64(&nodes[0].Waiting)
 	chosen := []*node{nodes[0]}
 	for _, n := range nodes[1:] {
@@ -408,7 +420,7 @@ func (g *Garden) selectService(name string) (*node, error) {
 		}
 	}
 	if len(chosen) == 1 {
-		return chosen[0], nil
+		return chosen[0]
 	}
-	return chosen[rand.Intn(len(chosen))], nil
+	return chosen[rand.Intn(len(chosen))]
 }
