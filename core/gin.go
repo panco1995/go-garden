@@ -1,9 +1,11 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -89,15 +91,15 @@ func (g *Garden) prometheus() gin.HandlerFunc {
 }
 
 func cors(ctx *gin.Context) {
-	method := ctx.Request.Method
 	ctx.Header("Access-Control-Allow-Origin", "*")
 	ctx.Header("Access-Control-Allow-Headers", "*")
 	ctx.Header("Access-Control-Allow-Methods", "*")
 	ctx.Header("Access-Control-Expose-Headers", "*")
-	ctx.Header("Access-Control-Allow-Credentials", "true")
-	if method == "OPTIONS" {
+	if ctx.Request.Method == http.MethodOptions {
 		ctx.AbortWithStatus(http.StatusNoContent)
+		return
 	}
+	ctx.Next()
 }
 
 func (g *Garden) openTracingMiddleware() gin.HandlerFunc {
@@ -111,12 +113,15 @@ func (g *Garden) openTracingMiddleware() gin.HandlerFunc {
 		span.SetTag("Status", "unfinished")
 
 		request := req{
-			getMethod(c),
-			getUrl(c),
-			getUrlParam(c),
-			getClientIp(c),
-			getHeaders(c),
-			getBody(c)}
+			Method:   getMethod(c),
+			Url:      getUrl(c),
+			UrlParam: getUrlParam(c),
+			ClientIp: getClientIp(c),
+			RemoteIp: c.RemoteIP(),
+			Headers:  getHeaders(c),
+			RawBody:  readRawBody(c),
+			Body:     getBody(c),
+		}
 		s, _ := json.Marshal(&request)
 		span.SetTag("Request", string(s))
 
@@ -137,18 +142,20 @@ func (g *Garden) openTracingMiddleware() gin.HandlerFunc {
 func (g *Garden) CheckCallSafeMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !g.checkCallSafe(c.GetHeader("Call-Key")) {
-			c.JSON(httpNotFound, gatewayFail(infoNoAuth))
+			c.JSON(httpUnauthorized, gatewayFail(infoNoAuth))
 			c.Abort()
+			return
 		}
+		c.Next()
 	}
 }
 
-//SetContext set custom context
+// SetContext set custom context
 func SetContext(c *gin.Context, name string, val interface{}) {
 	c.Set(name, val)
 }
 
-//GetContext get custom context
+// GetContext get custom context
 func GetContext(c *gin.Context, name string) (interface{}, error) {
 	t, success := c.Get(name)
 	if !success {
@@ -157,7 +164,7 @@ func GetContext(c *gin.Context, name string) (interface{}, error) {
 	return t, nil
 }
 
-//GetRequest get request datatype from context
+// GetRequest get request datatype from context
 func GetRequest(c *gin.Context) *req {
 	t, _ := GetContext(c, "request")
 	r := t.(*req)
@@ -177,6 +184,19 @@ func getMethod(c *gin.Context) string {
 
 func getClientIp(c *gin.Context) string {
 	return c.ClientIP()
+}
+
+func readRawBody(c *gin.Context) []byte {
+	if c.Request == nil || c.Request.Body == nil {
+		return nil
+	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.Request.Body = io.NopCloser(bytes.NewReader(nil))
+		return nil
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	return body
 }
 
 func getBody(c *gin.Context) MapData {

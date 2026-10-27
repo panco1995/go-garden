@@ -27,9 +27,11 @@ type (
 )
 
 const (
-	httpOk       = http.StatusOK
-	httpFail     = http.StatusInternalServerError
-	httpNotFound = http.StatusNotFound
+	httpOk              = http.StatusOK
+	httpFail            = http.StatusInternalServerError
+	httpNotFound        = http.StatusNotFound
+	httpUnauthorized    = http.StatusUnauthorized
+	httpTooManyRequests = http.StatusTooManyRequests
 
 	infoSuccess       = "Success"
 	infoServerError   = "Server Error"
