@@ -35,7 +35,7 @@ func (g *Garden) callService(span opentracing.Span, service, action string, requ
 		return httpNotFound, infoNotFound, nil, errors.New("service route not found")
 	}
 
-	serviceAddr, nodeIndex, err := g.selectService(service)
+	target, err := g.selectService(service)
 	if err != nil {
 		return httpNotFound, infoNotFound, nil, err
 	}
@@ -45,7 +45,7 @@ func (g *Garden) callService(span opentracing.Span, service, action string, requ
 		second, quantity, err := limiterAnalyze(route.Limiter)
 		if err != nil {
 			log.Error("limiter", err)
-		} else if !g.limiterInspect(serviceAddr+"/"+service+"/"+action, second, quantity) {
+		} else if !g.limiterInspect(target.Addr+"/"+service+"/"+action, second, quantity) {
 			span.SetTag("break", "service limiter")
 			return httpNotFound, infoServerLimiter, nil, errors.New("server limiter")
 		}
@@ -56,7 +56,7 @@ func (g *Garden) callService(span opentracing.Span, service, action string, requ
 		second, quantity, err := g.fusingAnalyze(route.Fusing)
 		if err != nil {
 			log.Error("fusingAnalyze", err)
-		} else if !g.fusingInspect(serviceAddr+"/"+service+"/"+action, second, quantity) {
+		} else if !g.fusingInspect(target.Addr+"/"+service+"/"+action, second, quantity) {
 			span.SetTag("break", "service fusing")
 			return httpNotFound, infoServerFusing, nil, errors.New("server fusing")
 		}
@@ -69,7 +69,7 @@ func (g *Garden) callService(span opentracing.Span, service, action string, requ
 		retry = []int{0}
 	}
 
-	code, result, header, err := g.retryGo(service, action, retry, nodeIndex, span, route, request, args, reply)
+	code, result, header, err := g.retryGo(service, action, retry, target, span, route, request, args, reply)
 
 	return code, result, header, err
 }

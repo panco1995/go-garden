@@ -32,7 +32,7 @@ func retryAnalyze(retry string) ([]int, error) {
 	return retrySlice, nil
 }
 
-func (g *Garden) retryGo(service, action string, retry []int, nodeIndex int, span opentracing.Span, route routeCfg, request *req, rpcArgs, rpcReply interface{}) (int, string, http.Header, error) {
+func (g *Garden) retryGo(service, action string, retry []int, target *node, span opentracing.Span, route routeCfg, request *req, rpcArgs, rpcReply interface{}) (int, string, http.Header, error) {
 	code := httpOk
 	result := infoSuccess
 	addr := ""
@@ -40,34 +40,36 @@ func (g *Garden) retryGo(service, action string, retry []int, nodeIndex int, spa
 	var header http.Header
 
 	for i, r := range retry {
-		atomic.AddInt64(&g.services[service].Nodes[nodeIndex].Waiting, 1)
+		atomic.AddInt64(&target.Waiting, 1)
 
 		if route.Type == "http" {
-			addr, err = g.getServiceHttpAddr(service, nodeIndex)
+			var host string
+			host, err = nodeHTTPAddr(target.Addr)
 			if err != nil {
 				code = httpFail
-				break
+			} else {
+				addr = "http://" + host + route.Path
+				code, result, header, err = g.requestServiceHttp(span, addr, request, route.Timeout)
 			}
-			addr = "http://" + addr + route.Path
-			code, result, header, err = g.requestServiceHttp(span, addr, request, route.Timeout)
 		} else if route.Type == "rpc" {
-			addr, err = g.getServiceRpcAddr(service, nodeIndex)
+			var host string
+			host, err = nodeRPCAddr(target.Addr)
 			if err != nil {
 				code = httpFail
-				break
-			}
-			action = capitalize(action)
-			err = rpcCall(span, addr, service, action, rpcArgs, rpcReply, route.Timeout)
-			if err != nil {
-				code = httpFail
+			} else {
+				action = capitalize(action)
+				err = rpcCall(span, host, service, action, rpcArgs, rpcReply, route.Timeout)
+				if err != nil {
+					code = httpFail
+				}
 			}
 		}
 
-		atomic.AddInt64(&g.services[service].Nodes[nodeIndex].Waiting, -1)
+		atomic.AddInt64(&target.Waiting, -1)
 
 		if err != nil {
 			log.Error("callService", err)
-			g.addFusingQuantity(g.services[service].Nodes[nodeIndex].Addr + "/" + service + "/" + action)
+			g.addFusingQuantity(target.Addr + "/" + service + "/" + action)
 
 			// call timeout don't retry
 			if strings.Contains(err.Error(), "Timeout") || strings.Contains(err.Error(), "deadline") {
@@ -90,7 +92,7 @@ func (g *Garden) retryGo(service, action string, retry []int, nodeIndex int, spa
 		break
 	}
 
-	atomic.AddInt64(&g.services[service].Nodes[nodeIndex].Finish, 1)
+	atomic.AddInt64(&target.Finish, 1)
 
 	return code, result, header, err
 }
